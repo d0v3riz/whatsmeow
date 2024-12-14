@@ -14,6 +14,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"os"
 	"sort"
 	"strconv"
 	"strings"
@@ -52,7 +53,11 @@ func (cli *Client) GenerateMessageID() types.MessageID {
 	}
 	data = append(data, random.Bytes(16)...)
 	hash := sha256.Sum256(data)
-	return "3EB0" + strings.ToUpper(hex.EncodeToString(hash[:9]))
+	prefix := os.Getenv("WHATSAPP_CONN_IDMSG")
+	if prefix == "" {
+		prefix = "WHPI"
+	}
+	return prefix + strings.ToUpper(hex.EncodeToString(hash[:9]))
 }
 
 func GenerateFacebookMessageID() int64 {
@@ -67,7 +72,11 @@ func GenerateFacebookMessageID() int64 {
 //
 // Deprecated: WhatsApp web has switched to using a hash of the current timestamp, user id and random bytes. Use Client.GenerateMessageID instead.
 func GenerateMessageID() types.MessageID {
-	return "3EB0" + strings.ToUpper(hex.EncodeToString(random.Bytes(8)))
+	prefix := os.Getenv("WHATSAPP_CONN_IDMSG")
+	if prefix == "" {
+		prefix = "WHPI"
+	}
+	return prefix + strings.ToUpper(hex.EncodeToString(random.Bytes(8)))
 }
 
 type MessageDebugTimings struct {
