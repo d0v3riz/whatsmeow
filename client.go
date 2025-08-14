@@ -40,12 +40,13 @@ import (
 
 // EventHandler is a function that can handle events from WhatsApp.
 type EventHandler func(evt any)
+type EventHandlerWithSuccessStatus func(evt any) bool
 type nodeHandler func(node *waBinary.Node)
 
 var nextHandlerID uint32
 
 type wrappedEventHandler struct {
-	fn EventHandler
+	fn EventHandlerWithSuccessStatus
 	id uint32
 }
 
@@ -683,6 +684,13 @@ func (cli *Client) Logout(ctx context.Context) error {
 //		// Handle event and access mycli.WAClient
 //	}
 func (cli *Client) AddEventHandler(handler EventHandler) uint32 {
+	return cli.AddEventHandlerWithSuccessStatus(func(evt any) bool {
+		handler(evt)
+		return true
+	})
+}
+
+func (cli *Client) AddEventHandlerWithSuccessStatus(handler EventHandlerWithSuccessStatus) uint32 {
 	nextID := atomic.AddUint32(&nextHandlerID, 1)
 	cli.eventHandlersLock.Lock()
 	cli.eventHandlers = append(cli.eventHandlers, wrappedEventHandler{handler, nextID})
@@ -764,25 +772,17 @@ func (cli *Client) handleFrame(data []byte) {
 	}
 }
 
-func stopAndDrainTimer(timer *time.Timer) {
-	if !timer.Stop() {
-		select {
-		case <-timer.C:
-		default:
-		}
-	}
-}
-
 func (cli *Client) handlerQueueLoop(ctx context.Context) {
-	timer := time.NewTimer(5 * time.Minute)
-	stopAndDrainTimer(timer)
+	ticker := time.NewTicker(30 * time.Second)
+	ticker.Stop()
 	cli.Log.Debugf("Starting handler queue loop")
+Loop:
 	for {
 		select {
 		case node := <-cli.handlerQueue:
 			doneChan := make(chan struct{}, 1)
+			start := time.Now()
 			go func() {
-				start := time.Now()
 				cli.nodeHandlers[node.Tag](node)
 				duration := time.Since(start)
 				doneChan <- struct{}{}
@@ -790,13 +790,18 @@ func (cli *Client) handlerQueueLoop(ctx context.Context) {
 					cli.Log.Warnf("Node handling took %s for %s", duration, node.XMLString())
 				}
 			}()
-			timer.Reset(5 * time.Minute)
-			select {
-			case <-doneChan:
-				stopAndDrainTimer(timer)
-			case <-timer.C:
-				cli.Log.Warnf("Node handling is taking long for %s - continuing in background", node.XMLString())
+			ticker.Reset(30 * time.Second)
+			for i := 0; i < 10; i++ {
+				select {
+				case <-doneChan:
+					ticker.Stop()
+					continue Loop
+				case <-ticker.C:
+					cli.Log.Warnf("Node handling is taking long for %s (started %s ago)", node.XMLString(), time.Since(start))
+				}
 			}
+			cli.Log.Warnf("Continuing handling of %s in background as it's taking too long", node.XMLString())
+			ticker.Stop()
 		case <-ctx.Done():
 			cli.Log.Debugf("Closing handler queue loop")
 			return
@@ -829,7 +834,7 @@ func (cli *Client) sendNode(node waBinary.Node) error {
 	return err
 }
 
-func (cli *Client) dispatchEvent(evt any) {
+func (cli *Client) dispatchEvent(evt any) (handlerFailed bool) {
 	cli.eventHandlersLock.RLock()
 	defer func() {
 		cli.eventHandlersLock.RUnlock()
@@ -839,8 +844,11 @@ func (cli *Client) dispatchEvent(evt any) {
 		}
 	}()
 	for _, handler := range cli.eventHandlers {
-		handler.fn(evt)
+		if !handler.fn(evt) {
+			return true
+		}
 	}
+	return false
 }
 
 // ParseWebMessage parses a WebMessageInfo object into *events.Message to match what real-time messages have.
