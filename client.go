@@ -69,6 +69,7 @@ type Client struct {
 
 	isLoggedIn            atomic.Bool
 	expectedDisconnect    *exsync.Event
+	forceAutoReconnect    atomic.Bool
 	EnableAutoReconnect   bool
 	InitialAutoReconnect  bool
 	LastSuccessfulConnect time.Time
@@ -88,6 +89,7 @@ type Client struct {
 	// EmitAppStateEventsOnFullSync can be set to true if you want to get app state events emitted
 	// even when re-syncing the whole state.
 	EmitAppStateEventsOnFullSync bool
+	AppStateDebugLogs            bool
 
 	AutomaticMessageRerequestFromPhone bool
 	pendingPhoneRerequests             map[types.MessageID]context.CancelFunc
@@ -448,6 +450,22 @@ func (cli *Client) Connect() error {
 	return cli.ConnectContext(cli.BackgroundEventCtx)
 }
 
+func isRetryableConnectError(err error) bool {
+	if exhttp.IsNetworkError(err) {
+		return true
+	}
+
+	var statusErr socket.ErrWithStatusCode
+	if errors.As(err, &statusErr) {
+		switch statusErr.StatusCode {
+		case 408, 500, 501, 502, 503, 504:
+			return true
+		}
+	}
+
+	return false
+}
+
 func (cli *Client) ConnectContext(ctx context.Context) error {
 	if cli == nil {
 		return ErrClientIsNil
@@ -457,7 +475,7 @@ func (cli *Client) ConnectContext(ctx context.Context) error {
 	defer cli.socketLock.Unlock()
 
 	err := cli.unlockedConnect(ctx)
-	if exhttp.IsNetworkError(err) && cli.InitialAutoReconnect && cli.EnableAutoReconnect {
+	if isRetryableConnectError(err) && cli.InitialAutoReconnect && cli.EnableAutoReconnect {
 		cli.Log.Errorf("Initial connection failed but reconnecting in background (%v)", err)
 		go cli.dispatchEvent(&events.Disconnected{})
 		go cli.autoReconnect(ctx)
@@ -516,13 +534,13 @@ func (cli *Client) IsLoggedIn() bool {
 }
 
 func (cli *Client) onDisconnect(ctx context.Context, ns *socket.NoiseSocket, remote bool) {
-	ns.Stop(false)
+	ns.Stop(false, false)
 	cli.socketLock.Lock()
 	defer cli.socketLock.Unlock()
 	if cli.socket == ns {
 		cli.socket = nil
 		cli.clearResponseWaiters(xmlStreamEndNode)
-		if !cli.isExpectedDisconnect() && remote {
+		if !cli.isExpectedDisconnect() && (cli.forceAutoReconnect.Swap(false) || remote) {
 			cli.Log.Debugf("Emitting Disconnected event")
 			go cli.dispatchEvent(&events.Disconnected{})
 			go cli.autoReconnect(ctx)
@@ -537,10 +555,12 @@ func (cli *Client) onDisconnect(ctx context.Context, ns *socket.NoiseSocket, rem
 }
 
 func (cli *Client) expectDisconnect() {
+	cli.forceAutoReconnect.Store(false)
 	cli.expectedDisconnect.Set()
 }
 
 func (cli *Client) resetExpectedDisconnect() {
+	cli.forceAutoReconnect.Store(false)
 	cli.expectedDisconnect.Clear()
 }
 
@@ -610,10 +630,25 @@ func (cli *Client) Disconnect() {
 	cli.clearDelayedMessageRequests()
 }
 
+// ResetConnection disconnects from the WhatsApp web websocket and forces an automatic reconnection.
+// This will not do anything if the socket is already disconnected or if EnableAutoReconnect is false.
+func (cli *Client) ResetConnection() {
+	if cli == nil {
+		return
+	}
+	cli.socketLock.Lock()
+	cli.forceAutoReconnect.Store(true)
+	if cli.socket != nil {
+		cli.socket.Stop(true, true)
+		cli.clearResponseWaiters(xmlStreamEndNode)
+	}
+	cli.socketLock.Unlock()
+}
+
 // Disconnect closes the websocket connection.
 func (cli *Client) unlockedDisconnect() {
 	if cli.socket != nil {
-		cli.socket.Stop(true)
+		cli.socket.Stop(true, false)
 		cli.socket = nil
 		cli.clearResponseWaiters(xmlStreamEndNode)
 	}
