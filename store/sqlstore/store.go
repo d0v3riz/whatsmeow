@@ -953,10 +953,6 @@ const (
 		DELETE FROM whatsmeow_privacy_tokens
 		WHERE our_jid=$1 AND timestamp < $2
 	`
-	deleteExpiredPrivacyTokens = `
-		DELETE FROM whatsmeow_privacy_tokens
-		WHERE our_jid=$1 AND timestamp < $2
-	`
 )
 
 const (
