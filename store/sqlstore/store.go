@@ -953,6 +953,19 @@ const (
 		DELETE FROM whatsmeow_privacy_tokens
 		WHERE our_jid=$1 AND timestamp < $2
 	`
+	deleteExpiredPrivacyTokens = `
+		DELETE FROM whatsmeow_privacy_tokens
+		WHERE our_jid=$1 AND timestamp < $2
+	`
+)
+
+const (
+	putNCTSaltQuery = `
+		INSERT INTO whatsmeow_nct_salt (our_jid, salt) VALUES ($1, $2)
+		ON CONFLICT (our_jid) DO UPDATE SET salt=excluded.salt
+	`
+	getNCTSaltQuery    = `SELECT salt FROM whatsmeow_nct_salt WHERE our_jid=$1`
+	deleteNCTSaltQuery = `DELETE FROM whatsmeow_nct_salt WHERE our_jid=$1`
 )
 
 func (s *SQLStore) PutPrivacyTokens(ctx context.Context, tokens ...store.PrivacyToken) error {
@@ -979,19 +992,40 @@ func (s *SQLStore) GetPrivacyToken(ctx context.Context, user types.JID) (*store.
 	var token store.PrivacyToken
 	token.User = user.ToNonAD()
 	var ts int64
-	var senderTs sql.NullInt64
-	err := s.db.QueryRow(ctx, getPrivacyToken, s.JID, token.User).Scan(&token.Token, &ts, &senderTs)
+	var senderTS sql.NullInt64
+	err := s.db.QueryRow(ctx, getPrivacyToken, s.JID, token.User).Scan(&token.Token, &ts, &senderTS)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	} else if err != nil {
 		return nil, err
 	} else {
 		token.Timestamp = time.Unix(ts, 0)
-		if senderTs.Valid {
-			token.SenderTimestamp = time.Unix(senderTs.Int64, 0)
+		if senderTS.Valid {
+			token.SenderTimestamp = time.Unix(senderTS.Int64, 0)
 		}
 		return &token, nil
 	}
+}
+
+func (s *SQLStore) PutNCTSalt(ctx context.Context, salt []byte) error {
+	_, err := s.db.Exec(ctx, putNCTSaltQuery, s.JID, salt)
+	return err
+}
+
+func (s *SQLStore) GetNCTSalt(ctx context.Context) ([]byte, error) {
+	var salt []byte
+	err := s.db.QueryRow(ctx, getNCTSaltQuery, s.JID).Scan(&salt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	} else if err != nil {
+		return nil, err
+	}
+	return salt, nil
+}
+
+func (s *SQLStore) DeleteNCTSalt(ctx context.Context) error {
+	_, err := s.db.Exec(ctx, deleteNCTSaltQuery, s.JID)
+	return err
 }
 
 func (s *SQLStore) DeleteExpiredPrivacyTokens(ctx context.Context, cutoff time.Time) (int64, error) {
