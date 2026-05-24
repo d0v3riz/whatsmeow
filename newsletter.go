@@ -124,6 +124,7 @@ const (
 	mutationCreateNewsletter       = "6234210096708695"
 	mutationUnfollowNewsletter     = "6392786840836363"
 	mutationFollowNewsletter       = "9926858900719341"
+	mutationDeleteNewsletter       = "30062808666639665"
 
 	// desktop & mobile
 	queryFetchNewsletterDesktop        = "9779843322044422"
@@ -370,6 +371,33 @@ func (cli *Client) FollowNewsletter(ctx context.Context, jid types.JID) error {
 // UnfollowNewsletter makes the user unfollow (leave) a WhatsApp channel.
 func (cli *Client) UnfollowNewsletter(ctx context.Context, jid types.JID) error {
 	_, err := cli.sendMexIQ(ctx, mutationUnfollowNewsletter, map[string]any{
+		"newsletter_id": jid.String(),
+	})
+	return err
+}
+
+// UpdateNewsletter edits a channel's metadata (name, description, picture, etc.).
+// The updates parameter should be a map matching the GraphQL `updates` input.
+func (cli *Client) UpdateNewsletter(ctx context.Context, jid types.JID, updates map[string]any) (*types.NewsletterMetadata, error) {
+	resp, err := cli.sendMexIQ(ctx, mutationUpdateNewsletter, map[string]any{
+		"newsletter_id": jid.String(),
+		"updates":       updates,
+	})
+	var respData struct {
+		Newsletter *types.NewsletterMetadata `json:"xwa2_newsletter_update"`
+	}
+	if resp != nil {
+		jsonErr := json.Unmarshal(resp, &respData)
+		if err == nil && jsonErr != nil {
+			err = jsonErr
+		}
+	}
+	return respData.Newsletter, err
+}
+
+// DeleteNewsletter deletes a channel.
+func (cli *Client) DeleteNewsletter(ctx context.Context, jid types.JID) error {
+	_, err := cli.sendMexIQ(ctx, mutationDeleteNewsletter, map[string]any{
 		"newsletter_id": jid.String(),
 	})
 	return err
