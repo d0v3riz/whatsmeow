@@ -17,6 +17,7 @@ import (
 	"net/http"
 	"net/url"
 	"runtime/debug"
+	"slices"
 	"strconv"
 	"sync"
 	"sync/atomic"
@@ -88,6 +89,8 @@ type Client struct {
 	lastDecryptedBufferClear   time.Time
 	lastTcTokenSenderTsCleanup time.Time
 	lastTcTokenDBPrune         time.Time
+	lastUnifiedSessionSend     time.Time
+	UnifiedSessionInterval     time.Duration
 
 	DisableLoginAutoReconnect bool
 
@@ -112,6 +115,7 @@ type Client struct {
 
 	uploadPreKeysLock sync.Mutex
 	lastPreKeyUpload  time.Time
+	PreKeysUploaded   *exsync.Event
 
 	mediaConnCache *MediaConn
 	mediaConnLock  sync.Mutex
@@ -218,7 +222,22 @@ type Client struct {
 type groupMetaCache struct {
 	AddressingMode             types.AddressingMode
 	CommunityAnnouncementGroup bool
+	ReadOnly                   bool
 	Members                    []types.JID
+	Admins                     []types.JID
+}
+
+func (gmc *groupMetaCache) CanSend(sender types.JID, message *waE2E.Message) bool {
+	return gmc == nil ||
+		!gmc.ReadOnly ||
+		message.PollUpdateMessage != nil ||
+		message.ReactionMessage != nil ||
+		message.EncReactionMessage != nil ||
+		message.EncEventResponseMessage != nil ||
+		message.QuestionResponseMessage != nil ||
+		message.CommentMessage != nil ||
+		message.EncCommentMessage != nil ||
+		slices.Contains(gmc.Admins, sender.ToNonAD())
 }
 
 type MessengerConfig struct {
@@ -270,6 +289,7 @@ func NewClient(deviceStore *store.Device, log waLog.Logger) *Client {
 		appStateProc:       appstate.NewProcessor(deviceStore, log.Sub("AppState")),
 		socketWait:         make(chan struct{}),
 		expectedDisconnect: exsync.NewEvent(),
+		PreKeysUploaded:    exsync.NewEvent(),
 
 		incomingRetryRequestCounter: make(map[incomingRetryKey]int),
 
@@ -506,8 +526,7 @@ func isRetryableConnectError(err error) bool {
 		return true
 	}
 
-	var statusErr socket.ErrWithStatusCode
-	if errors.As(err, &statusErr) {
+	if statusErr, ok := errors.AsType[socket.ErrWithStatusCode](err); ok {
 		switch statusErr.StatusCode {
 		case 408, 500, 501, 502, 503, 504:
 			return true
@@ -1091,11 +1110,14 @@ func (cli *Client) getUnifiedSessionID() string {
 	return strconv.FormatInt(unifiedID, 10)
 }
 
-func (cli *Client) sendUnifiedSession() {
+func (cli *Client) sendUnifiedSession(checkLastSend bool) {
 	if cli == nil {
 		return
 	}
-
+	if checkLastSend && time.Since(cli.lastUnifiedSessionSend) < cli.UnifiedSessionInterval {
+		return
+	}
+	cli.lastUnifiedSessionSend = time.Now()
 	node := waBinary.Node{
 		Tag:   "ib",
 		Attrs: waBinary.Attrs{},
